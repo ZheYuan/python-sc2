@@ -6,7 +6,7 @@ from .position import Point2
 class PixelMap:
     def __init__(self, proto):
         self._proto = proto
-        assert self.bits_per_pixel % 8 == 0, "Unsupported pixel density"
+        # assert self.bits_per_pixel % 8 == 0, "Unsupported pixel density"
         assert self.width * self.height * self.bits_per_pixel / 8 == len(self._proto.data)
         self.data = bytearray(self._proto.data)
 
