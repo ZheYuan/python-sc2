@@ -9,26 +9,33 @@ import numpy as np
 import cv2 as cv
 import time
 import keras  # Keras 2.1.2 and TF-GPU 1.8.0
-from keras.models import Sequential
-from keras.layers import Dense, Dropout, Flatten
-from keras.layers import Conv2D, MaxPooling2D
-from keras.callbacks import TensorBoard
 import os
+import math
 
-HEADLESSS = False
-#os.environ["SC2PATH"] = '/starcraftstuff/StarCraftII/'
+HEADLESS = False
+
+
+# os.environ["SC2PATH"] = '/starcraftstuff/StarCraftII/'
 
 class ProtossBot(sc2.BotAI):
-    def __init__(self):
+    def __init__(self, use_model=False):
         self.ITERATIONS_PER_MINUTE = 165  # 每秒大约165个循环
         self.MAX_WORKERS = 50
         self.MAX_GATEWAY = 5
-        self.MAX_GATEWAY_RATIO = 2
         self.do_something_after = 0
         self.train_data = []
+        self.use_model = use_model
+
+        if self.use_model:
+            print("Loading model!")
+            self.model = keras.models.load_model("BasicCNN-10-epochs-0.001-LR-STAGE1")
+            print("Load completed")
 
     async def on_step(self, iteration):
-        self.iteration = iteration
+        # self.iteration = iteration
+        self.stime = (self.state.game_loop / 22.4) / 60
+        # print('Time:' + str(self.stime))
+        await self.build_scout()
         await self.scout()
         await self.distribute_workers()
         await self.build_workers()  # 建造农民
@@ -39,6 +46,13 @@ class ProtossBot(sc2.BotAI):
         await self.build_offensive_force()  # 建造攻击单位
         await self.intel()  # 绘制地图
         await self.attack()  # 攻击
+
+    async def build_scout(self):
+        if len(self.units(UnitTypeId.OBSERVER)) < math.floor(self.stime / 3):
+            for rf in self.units(UnitTypeId.ROBOTICSFACILITY).ready.noqueue:
+                print(len(self.units(UnitTypeId.OBSERVER)), self.stime / 3)
+                if self.can_afford(UnitTypeId.OBSERVER) and self.supply_left > 0:
+                    await self.do(rf.train(UnitTypeId.OBSERVER))
 
     async def build_workers(self):  # 建造农民
         if (len(self.units(UnitTypeId.NEXUS)) * 16) > len(self.units(UnitTypeId.PROBE)) \
@@ -67,9 +81,11 @@ class ProtossBot(sc2.BotAI):
                     await self.do(worker.build(UnitTypeId.ASSIMILATOR, vaspene))
 
     async def expand(self):  # 开分矿
-        if self.units(UnitTypeId.NEXUS).amount < (self.iteration / self.ITERATIONS_PER_MINUTE) \
-                and self.can_afford(UnitTypeId.NEXUS):
-            await self.expand_now()
+        try:
+            if self.units(UnitTypeId.NEXUS).amount < self.stime / 2 and self.can_afford(UnitTypeId.NEXUS):
+                await self.expand_now()
+        except Exception as e:
+            print(str(e))
 
     async def offensive_force_buildings(self):  # 建造所需兵营及科技建筑
         # print(self.iteration / self.ITERATIONS_PER_MINUTE)
@@ -81,7 +97,7 @@ class ProtossBot(sc2.BotAI):
                 if self.can_afford(UnitTypeId.CYBERNETICSCORE) and not self.already_pending(UnitTypeId.CYBERNETICSCORE):
                     await self.build(UnitTypeId.CYBERNETICSCORE, near=pylon)  # 机械核心
 
-            elif len(self.units(UnitTypeId.GATEWAY)) < ((self.iteration / self.ITERATIONS_PER_MINUTE) / 2):
+            elif len(self.units(UnitTypeId.GATEWAY)) < 1:
                 if self.can_afford(UnitTypeId.GATEWAY) and not self.already_pending(UnitTypeId.GATEWAY):
                     await self.build(UnitTypeId.GATEWAY, near=pylon)  # 传送门
 
@@ -92,7 +108,7 @@ class ProtossBot(sc2.BotAI):
                         await self.build(UnitTypeId.ROBOTICSFACILITY, near=pylon)  # 机械工厂，生产哨兵、不朽、巨像
 
             if self.units(UnitTypeId.CYBERNETICSCORE).ready.exists:
-                if len(self.units(UnitTypeId.STARGATE)) < ((self.iteration / self.ITERATIONS_PER_MINUTE) / 2):
+                if len(self.units(UnitTypeId.STARGATE)) < self.stime:  # changed here!
                     if self.can_afford(UnitTypeId.STARGATE) and not self.already_pending(UnitTypeId.STARGATE):
                         await self.build(UnitTypeId.STARGATE, near=pylon)  # 星际之门
 
@@ -117,17 +133,23 @@ class ProtossBot(sc2.BotAI):
     async def attack(self):
         # {UNIT: [n to fight, n to defend]}
         if len(self.units(UnitTypeId.VOIDRAY).idle) > 0:
-            choice = random.randrange(0, 4)
             target = False
-            if self.iteration > self.do_something_after:
+
+            if self.stime > self.do_something_after:
+                if self.use_model:
+                    prediction = self.model.predict([self.flipped.reshape([-1, 176, 200, 3])])
+                    choice = np.argmax(prediction[0])
+                else:
+                    choice = random.randrange(0, 4)
+
                 if choice == 0:
                     # no attack
-                    wait = random.randrange(20, 165)
-                    self.do_something_after = self.iteration + wait
+                    wait = random.randrange(7, 100) / 100
+                    self.do_something_after = self.stime + wait
 
                 elif choice == 1:
                     # attack_unit_closest_nexus
-                    if len(self.known_enemy_units) > 0 and self.units(UnitTypeId.NEXUS).empty() is False:
+                    if len(self.known_enemy_units) > 0 and self.units(UnitTypeId.NEXUS).empty():
                         target = self.known_enemy_units.closest_to(random.choice(self.units(UnitTypeId.NEXUS)))
 
                 elif choice == 2:
@@ -144,7 +166,7 @@ class ProtossBot(sc2.BotAI):
                         await self.do(vr.attack(target))
                 y = np.zeros(4)
                 y[choice] = 1
-                print("choice: " + str(y))
+                # print("choice: " + str(y))
                 self.train_data.append([y, self.flipped])
 
     async def intel(self):
@@ -174,7 +196,8 @@ class ProtossBot(sc2.BotAI):
                 pos = unit.position
                 cv.circle(game_data, (int(pos[0]), int(pos[1])), draw_dict[unit_type][0], draw_dict[unit_type][1], -1)
 
-        main_base_names = ["nexus", "supplydepot", "hatchery"]
+        # NOT THE MOST IDEAL, BUT WHATEVER LOL
+        main_base_names = ["nexus", "commandcenter", "hatchery"]
         for enemy_building in self.known_enemy_structures:
             pos = enemy_building.position
             if enemy_building.name.lower() not in main_base_names:
@@ -201,6 +224,10 @@ class ProtossBot(sc2.BotAI):
             pos = obs.position
             cv.circle(game_data, (int(pos[0]), int(pos[1])), 1, (255, 255, 255), -1)
 
+        for vr in self.units(UnitTypeId.VOIDRAY).ready:
+            pos = vr.position
+            cv.circle(game_data, (int(pos[0]), int(pos[1])), 3, (255, 100, 0), -1)
+
         line_max = 50
         mineral_ratio = self.minerals / 1500
         if mineral_ratio > 1.0:
@@ -210,13 +237,13 @@ class ProtossBot(sc2.BotAI):
         if vespene_ratio > 1.0:
             vespene_ratio = 1.0
 
-        population_ratio = self.supply_left / (self.supply_cap + 1e-7)
+        population_ratio = self.supply_left / self.supply_cap
         if population_ratio > 1.0:
             population_ratio = 1.0
 
         plausible_supply = self.supply_cap / 200.0
 
-        military_weight = len(self.units(UnitTypeId.VOIDRAY)) / (self.supply_cap - self.supply_left + 1e-7)
+        military_weight = len(self.units(UnitTypeId.VOIDRAY)) / (self.supply_cap - self.supply_left)
         if military_weight > 1.0:
             military_weight = 1.0
 
@@ -230,20 +257,23 @@ class ProtossBot(sc2.BotAI):
 
         # flip horizontally to make our final fix in visual representation:
         self.flipped = cv.flip(game_data, 0)
-        if not HEADLESSS:
-            resized = cv.resize(self.flipped, dsize=None, fx=2, fy=2)
+        resized = cv.resize(self.flipped, dsize=None, fx=2, fy=2)
 
-            cv.imshow('Intel', resized)
+        if not HEADLESS:
+            if self.use_model:
+                cv.imshow('Model Intel', resized)
+            else:
+                cv.imshow('Random Intel', resized)
+
             cv.waitKey(1)
-
-
 
     def random_location_variance(self, enemy_start_location):
         x = enemy_start_location[0]
         y = enemy_start_location[1]
 
-        x += ((random.randrange(-20, 20)) / 100) * enemy_start_location[0]
-        y += ((random.randrange(-20, 20)) / 100) * enemy_start_location[1]
+        #  FIXED THIS
+        x += ((random.randrange(-20, 20)) / 100) * self.game_info.map_size[0]
+        y += ((random.randrange(-20, 20)) / 100) * self.game_info.map_size[1]
 
         if x < 0:
             x = 0
@@ -258,6 +288,10 @@ class ProtossBot(sc2.BotAI):
         return go_to
 
     async def scout(self):
+        '''
+        ['__call__', '__class__', '__delattr__', '__dict__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__le__', '__lt__', '__module__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', '__weakref__', '_game_data', '_proto', '_type_data', 'add_on_tag', 'alliance', 'assigned_harvesters', 'attack', 'build', 'build_progress', 'cloak', 'detect_range', 'distance_to', 'energy', 'facing', 'gather', 'has_add_on', 'has_buff', 'health', 'health_max', 'hold_position', 'ideal_harvesters', 'is_blip', 'is_burrowed', 'is_enemy', 'is_flying', 'is_idle', 'is_mine', 'is_mineral_field', 'is_powered', 'is_ready', 'is_selected', 'is_snapshot', 'is_structure', 'is_vespene_geyser', 'is_visible', 'mineral_contents', 'move', 'name', 'noqueue', 'orders', 'owner_id', 'position', 'radar_range', 'radius', 'return_resource', 'shield', 'shield_max', 'stop', 'tag', 'train', 'type_id', 'vespene_contents', 'warp_in']
+        '''
+
         if len(self.units(UnitTypeId.OBSERVER)) > 0:
             scout = self.units(UnitTypeId.OBSERVER)[0]
             if scout.is_idle:
@@ -275,7 +309,8 @@ class ProtossBot(sc2.BotAI):
         print('--- on_end called ---')
         print(game_result)
 
-        if game_result == Result.Victory:
-            np.save("model/train_data/{}.npy".format(str(int(time.time()))), np.array(self.train_data))
-
-
+        with open("gameout-random-vs-medium.txt", "a") as f:
+            if self.use_model:
+                f.write("Model {}\n".format(game_result))
+            else:
+                f.write("Random {}\n".format(game_result))

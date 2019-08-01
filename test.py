@@ -9,4 +9,4 @@ if __name__ == '__main__':
     run_game(maps.get("AbyssalReefLE"), [
         Bot(Race.Protoss, ProtossBot()),
         Computer(Race.Terran, Difficulty.Hard)
-    ], realtime=True)
+    ], realtime=False)
